@@ -23,19 +23,21 @@ import norse.torch as norse
 from minkowski.lif import MinkowskiLIFCell
 
 
-class NMNISTReLUNetwork(torch.nn.Module):
+class NMNISTReLUNetwork(ME.MinkowskiNetwork): #torch.nn.Module
     def __init__(self, in_channels, out_channels=128, out_features=10, D=3):
-        super().__init__()
+        super().__init__(D=D)
         self.net = torch.nn.Sequential(
             ME.MinkowskiConvolution(in_channels, 32, 5, dimension=D),
             ME.MinkowskiConvolution(32, 64, 5, stride=2, dimension=D),
-            ME.MinkowskiReLU(),
+            ME.MinkowskiBatchNorm(64),
+            ME.MinkowskiLeakyReLU(),
             ME.MinkowskiConvolution(64, out_channels, kernel_size=3, dimension=D),
-            ME.MinkowskiReLU(),
+            ME.MinkowskiBatchNorm(out_channels),
+            ME.MinkowskiLeakyReLU(),
             ME.MinkowskiGlobalPooling(),
             ME.MinkowskiLinear(128, out_features),
-            ME.MinkowskiReLU(),
-            ME.MinkowskiSoftmax(),
+            ME.MinkowskiLeakyReLU(),
+            #ME.MinkowskiSoftmax(),
             ME.MinkowskiToFeature(),
         )
 
@@ -90,18 +92,21 @@ class NMNISTModule(pl.LightningModule):
     #     labels = [x[1] for x in list_data]
     #     return batches, torch.stack(labels).squeeze()
 
+
+    def setup(self, stage = None):
+        if stage == 'fit' or stage is None:
+            nmnist_full = tonic.datasets.NMNIST(save_to=self.data_root, train=True, transform=self.transform)
+            self.nmnist_train, self.mnist_val = torch.utils.data.random_split(nmnist_full, [len(nmnist_full), 0])
+
+
     def train_dataloader(self):
         return torch.utils.data.DataLoader(
-            tonic.datasets.NMNIST(
-                save_to=self.data_root,
-                train=True,
-                transform=self.transform,
-            ),
+            self.nmnist_train,
             collate_fn=tonic.utils.pad_tensors,
             batch_size=self.batch_size,
             shuffle=True,
         )
-
+    
     # def val_dataloader(self):
     #     return DataLoader(
     #         tonic.datasets.NMNIST(save_to="./data", train=False, transform=transform),
@@ -114,11 +119,16 @@ class NMNISTModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         chunks, labels = batch
+        labels = torch.tensor(labels).to(self.device)
         # Must clear cache at regular interval
-        if self.global_step % 10 == 0:
-            torch.cuda.empty_cache()
+        #if self.global_step % 100 == 0:
+        #    torch.cuda.empty_cache()
         out = self(chunks)
+        print("output: " + str(out))
+        print("labels: " + str(labels))
         loss = self.criterion(out, labels)
+        print("loss: " + str(loss))
+        self.log('train_loss', loss)
         return loss
 
     # def validation_step(self, batch, batch_idx):
@@ -136,8 +146,9 @@ class NMNISTModule(pl.LightningModule):
         optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
-        return [optimizer], [scheduler]
+        #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
+        #return [optimizer], [scheduler]
+        return optimizer
 
 
 def main(args):
@@ -146,12 +157,12 @@ def main(args):
         [
             tonic_transforms.Denoise(filter_time=10000),
             tonic_transforms.Subsample(args.subsample),
-            tonic_transforms.ToSparseTensor(),
+            tonic_transforms.ToSparseTensor(merge_polarities=True),
         ]
     )
 
-    network = NMNISTReLUNetwork(in_channels=2)
-    module = NMNISTModule(network, 8, transform=transform, data_root=args.data_root)
+    network = NMNISTReLUNetwork(in_channels=1)
+    module = NMNISTModule(network, 8, transform=transform, data_root=args.data_root, weight_decay=args.weight_decay)
 
     trainer = pl.Trainer.from_argparse_args(args)
     trainer.fit(module)
@@ -177,6 +188,18 @@ if __name__ == "__main__":
         type=str,
         default="./data",
         help="The root of data for the NMNIST dataset. Defaults to ./data",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        default=1e-5,
+        type=float,
+        help="Weight decay of optimizer",
+    )
+    parser.add_argument(
+        "--lr",
+        default=1e-2,
+        type=float,
+        help="Learning rate",
     )
     args = parser.parse_args()
     main(args)
