@@ -23,7 +23,7 @@ import norse.torch as norse
 from minkowski.lif import MinkowskiLIFCell
 
 
-class NMNISTReLUNetwork(ME.MinkowskiNetwork): #torch.nn.Module
+class NMNISTReLUNetwork(ME.MinkowskiNetwork):
     def __init__(self, in_channels, out_channels=128, out_features=10, D=3):
         super().__init__(D=D)
         self.net = torch.nn.Sequential(
@@ -37,7 +37,6 @@ class NMNISTReLUNetwork(ME.MinkowskiNetwork): #torch.nn.Module
             ME.MinkowskiGlobalPooling(),
             ME.MinkowskiLinear(128, out_features),
             ME.MinkowskiLeakyReLU(),
-            #ME.MinkowskiSoftmax(),
             ME.MinkowskiToFeature(),
         )
 
@@ -58,6 +57,7 @@ class NMNISTModule(pl.LightningModule):
         lr=1e-2,
         weight_decay=1e-5,
         data_root="./data",
+        train_split=1.0
     ):
         super().__init__()
         self.model = model
@@ -68,6 +68,8 @@ class NMNISTModule(pl.LightningModule):
 
         self.criterion = torch.nn.CrossEntropyLoss()
         self.transform = transform
+
+        self.train_split = train_split
 
     def forward(self, x):
         return self.model(x)
@@ -96,7 +98,7 @@ class NMNISTModule(pl.LightningModule):
     def setup(self, stage = None):
         if stage == 'fit' or stage is None:
             nmnist_full = tonic.datasets.NMNIST(save_to=self.data_root, train=True, transform=self.transform)
-            self.nmnist_train, self.mnist_val = torch.utils.data.random_split(nmnist_full, [len(nmnist_full), 0])
+            self.nmnist_train, self.mnist_val = torch.utils.data.random_split(nmnist_full, [int(self.train_split * len(nmnist_full)), int((1-self.train_split)*len(nmnist_full))])
 
 
     def train_dataloader(self):
@@ -119,15 +121,12 @@ class NMNISTModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         chunks, labels = batch
-        labels = torch.tensor(labels).to(self.device)
         # Must clear cache at regular interval
-        #if self.global_step % 100 == 0:
-        #    torch.cuda.empty_cache()
+        if self.global_step % 100 == 0:
+            torch.cuda.empty_cache()
         out = self(chunks)
-        print("output: " + str(out))
-        print("labels: " + str(labels))
+        labels = torch.tensor(labels).to(self.device)
         loss = self.criterion(out, labels)
-        print("loss: " + str(loss))
         self.log('train_loss', loss)
         return loss
 
@@ -146,9 +145,9 @@ class NMNISTModule(pl.LightningModule):
         optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-        #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
-        #return [optimizer], [scheduler]
-        return optimizer
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
+        return [optimizer], [scheduler]
+
 
 
 def main(args):
@@ -201,5 +200,12 @@ if __name__ == "__main__":
         type=float,
         help="Learning rate",
     )
+    parser.add_argument(
+        "--train_split",
+        default=1.0,
+        type=float,
+        help="Rate to split train and validation set (specifies train set size)",
+    )
     args = parser.parse_args()
     main(args)
+
