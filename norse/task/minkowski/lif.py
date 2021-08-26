@@ -4,6 +4,8 @@ from typing import NamedTuple
 
 import MinkowskiEngine as ME
 
+from norse.torch.functional.lif import LIFParameters
+
 from norse.torch import LIFFeedForwardState, LIFCell
 
 
@@ -14,48 +16,28 @@ class MinkowskiLIFState(NamedTuple):
 
 
 class MinkowskiLIFCell(ME.MinkowskiModuleBase):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, shape, v_th, tau_mem, method):
         super().__init__()
-        self.module = LIFCell(*args, **kwargs)
+        self.v_th = torch.nn.Parameter(torch.as_tensor(v_th))
+        self.tau_mem = torch.nn.Parameter(torch.as_tensor(tau_mem))
+        self.module = LIFCell(p=LIFParameters(tau_mem_inv=self.tau_mem, v_th=self.v_th, method=method))
         self.union = ME.MinkowskiUnion()
+        self.shape = shape
+
+    def set_batch_size(self, batch_size):
+        shape = torch.Size([batch_size, 1] + list(self.shape))
+        self.dense = ME.MinkowskiToDenseTensor(shape=shape)
 
     def forward(self, input, state):
+        output, s_out = self.module(self.dense(input), state)
+        if torch.sum(output) == 0:
+            return ME.to_sparse_all(output), s_out
+        else:
+            return ME.to_sparse(output), s_out
+
+"""
+    def forward(self, input, state):
         if state is not None:
-            """
-            # Align state with input
-            zero_state_tensor = ME.SparseTensor(
-                features=torch.zeros_like(state.v.F),
-                coordinates=state.v.C,
-                coordinate_manager=input.coordinate_manager,
-            )
-            print("v: " + str(state.v))
-            v_in = ME.SparseTensor(
-                    features=state.v.F,
-                    coordinates=state.v.C,
-                    coordinate_manager=input.coordinate_manager,
-                )
-            print("v_in: " + str(v_in))
-            #print("v coordinates: " + str(state.v.C))
-            #print("v features: " + str(state.v.F))
-            print("input: " + str(input))
-            #print("input coordinates: " + str(input.C))
-            #print("input features: " + str(input.F))
-            v_tensor = self.union(
-                input,
-                v_in
-            )
-            print("v_tensor: " + str(v_tensor))
-            i_tensor = self.union(
-                input,
-                ME.SparseTensor(
-                    features=state.i.F,
-                    coordinates=state.i.C,
-                    coordinate_manager=input.coordinate_manager,
-                ),
-            )
-            state = LIFFeedForwardState(v_tensor.F, i_tensor.F)
-            input = self.union(input, zero_state_tensor)
-            """
             lifstate = LIFFeedForwardState(state.v.F, state.i.F)
 
             output, s_out = self.module(input.F, lifstate)
@@ -73,7 +55,6 @@ class MinkowskiLIFCell(ME.MinkowskiModuleBase):
                 ),
                 z=output,
             )
-
         else:
             zero_input_tensor = ME.SparseTensor(
                 features=torch.zeros_like(input.F),
@@ -107,3 +88,4 @@ class MinkowskiLIFCell(ME.MinkowskiModuleBase):
             ),
             new_state
         )
+"""
