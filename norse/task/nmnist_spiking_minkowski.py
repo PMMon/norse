@@ -41,7 +41,6 @@ class SNNMinkowski(ME.MinkowskiNetwork):
 
         self.lif1 = MinkowskiLIFCell((width, height), v_th, tau_mem, method)
         self.lif2 = MinkowskiLIFCell((width, height), v_th, tau_mem, method)
-        #self.lif3 = MinkowskiLIFCell((width, height), v_th, tau_mem, method)
 
         self.loc_pool = ME.MinkowskiAvgPooling([2, 2], stride=1, dimension=D)
         self.glob_pool = ME.MinkowskiMaxPooling([width, height], stride=[width, height], dimension=D) #ME.MinkowskiGlobalPooling()
@@ -69,82 +68,53 @@ class SNNMinkowski(ME.MinkowskiNetwork):
 
         self.lif1.set_batch_size(batch_size)
         self.lif2.set_batch_size(batch_size)
-        #self.lif3.set_batch_size(batch_size)
 
         voltage = torch.zeros(seq_len, batch_size, self.out_features)
 
-        for t_step in range(dense.shape[0]): # in times:
+        for t_step in range(dense.shape[0]):
+            # get input
             sparse_in = self.pad_batch(None, dense[t_step], batch_size)
-            #print("sparse_in: " + str(sparse_in))
-            #print("dim: " + str(sparse_in.shape))
 
+            # first set of convolutions
             z = self.batchnorm1(self.conv2(self.conv1(sparse_in)))
-            #print(z.shape)
 
-            #print("process first LIF")
+            # run through LIF
             z, s1 = self.lif1(z, s1)
             z = self.pad_batch(z, dense[t_step], batch_size)
-            #print("z: " + str(z))
-
-            #print(z.shape)
-            #print("process local pool")
             z = self.loc_pool(z)
-            #print("z: " + str(z))
-            #print(z.shape)
 
+            # second set of convolutions
             z = self.batchnorm2(self.conv3(z))
-            #print(z.shape)
 
-            #print("process second LIF")
+            # run through LIF
             z, s2 = self.lif2(z, s2)
-            #print("z: " + str(z))
             z = self.pad_batch(z, dense[t_step], batch_size)
-            #print("z: " + str(z))
-            #print(z.shape)
             z = self.glob_pool(z)
-            #print(z.shape)
 
-            #print("process fc")
+            # linear layer and non-linearity
             z = self.fc1(z)
             z = self.lrelu(z)
 
-            #print("process third LIF")
-            #z, s3 = self.lif3(z, s3)
-            #z = self.pad_batch(z, dense[t_step], batch_size)
-
+            # final voltages
             z = self.to_feature(z)
-            #print(z.shape)
-
             v_out, sout = self.out(z, sout)
 
-            #print("final output: " + str(v_out))
-
-            #print("output: " + str(v_out))
-            #print("dim: " + str(v_out.shape))
-            #print(" ============ " + str(t_step) + " ==============")
-
             voltage[t_step, :, :] = v_out
-
-        #print("v_out: " + str(v_out))
 
         return voltage
 
 
     def pad_batch(self, sparse_in, dense_in, batch_size):
+        """
+        Pads sparse zero input with zero features at coordinate origin [0,0]
+        :param sparse_in: sparse input
+        :param dense_in: dense input
+        :param batch_size: batch size
+        :return: padded input
+        """
         if torch.sum(dense_in) == 0 and not sparse_in:
-            #print("empty input!")
-            #print("shape: " + str(dense_in.shape))
-            """
-            padding = ME.SparseTensor(
-                features=torch.zeros(batch_size, 1).type_as(sparse_input.F),
-                coordinates=torch.cat((torch.arange(0, batch_size).unsqueeze(1), torch.zeros(batch_size, 2)), 1).type_as(sparse_input.C),#.type_as(sparse_input.C)
-                coordinate_manager=sparse_input.coordinate_manager
-            )
-            print("padding: " + str(padding))
-            """
             return self.glob_pool(ME.to_sparse_all(dense_in))
 
-            return self.union(sparse_in, padding)
         else:
             if not sparse_in:
                 sparse_in = ME.to_sparse(dense_in)
