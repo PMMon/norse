@@ -26,7 +26,7 @@ from minkowski.lif import MinkowskiLIFCell
 
 
 class SNNMinkowski(ME.MinkowskiNetwork):
-    def __init__(self, in_channels, out_channels=128, out_features=10, D=2, method='super', alpha=100., v_th = 1.):
+    def __init__(self, in_channels, out_channels=128, out_features=10, D=2, method='super', alpha=100., v_th = 1., tau_mem = 100., width=34, height=34):
         super().__init__(D=D)
         self.conv1 = ME.MinkowskiConvolution(in_channels, 32, 5, dimension=D)
         self.conv2 = ME.MinkowskiConvolution(32, 64, 5, stride=2, dimension=D)
@@ -37,12 +37,14 @@ class SNNMinkowski(ME.MinkowskiNetwork):
 
         self.fc1 = ME.MinkowskiLinear(128, out_features)
 
-        self.lif1 = MinkowskiLIFCell(p=LIFParameters(method=method, alpha=alpha, v_th=torch.as_tensor(v_th)))
-        self.lif2 = MinkowskiLIFCell(p=LIFParameters(method=method, alpha=alpha, v_th=torch.as_tensor(v_th)))
-        self.lif3 = MinkowskiLIFCell(p=LIFParameters(method=method, alpha=alpha, v_th=torch.as_tensor(v_th)))
+        self.lrelu = ME.MinkowskiLeakyReLU()
 
-        self.glob_pool = ME.MinkowskiAvgPooling([36, 36], stride=[36, 36], dimension=D)
-        #self.glob_pool = ME.MinkowskiGlobalPooling()
+        self.lif1 = MinkowskiLIFCell((width, height), v_th, tau_mem, method)
+        self.lif2 = MinkowskiLIFCell((width, height), v_th, tau_mem, method)
+        #self.lif3 = MinkowskiLIFCell((width, height), v_th, tau_mem, method)
+
+        self.loc_pool = ME.MinkowskiAvgPooling([2, 2], stride=1, dimension=D)
+        self.glob_pool = ME.MinkowskiMaxPooling([width, height], stride=[width, height], dimension=D) #ME.MinkowskiGlobalPooling()
 
         self.to_feature = ME.MinkowskiToFeature()
 
@@ -53,91 +55,111 @@ class SNNMinkowski(ME.MinkowskiNetwork):
         self.union = ME.MinkowskiUnion()
 
 
+
     def forward(self, x):
         batch_size, seq_len, channel, _, _ = x.shape
 
         # initial state
         s1, s2, s3, sout = None, None, None, None
 
-        print("x: " + str(x))
-        print("dim: " + str(x.shape))
-
         # Force TBCXY format
         dense = x.to_dense().permute(1, 0, 2, 3, 4)
 
-        sparse_input = ME.to_sparse(dense)
+        # times = set(sparse_input.C[:, 0].cpu().tolist())
 
-        times = set(sparse_input.C[:, 0].cpu().tolist())
+        self.lif1.set_batch_size(batch_size)
+        self.lif2.set_batch_size(batch_size)
+        #self.lif3.set_batch_size(batch_size)
+
         voltage = torch.zeros(seq_len, batch_size, self.out_features)
 
-        for t_step in times: # range(dense.shape[0]):
-            print("dim: " + str(dense[t_step].shape))
-
-            sparse_in = ME.to_sparse(dense[t_step])
-
-            print("sparse_in: " + str(sparse_in))
-            print("dim: " + str(sparse_in.shape))
-
-            print("c shape: " + str(sparse_in.C.shape))
-            if sparse_in.C.shape[0] == 0:
-                print("empty input!")
-                sparse_in = ME.SparseTensor(
-                    features=torch.zeros(batch_size, 1).type_as(sparse_input.F),
-                    coordinates=torch.cat((torch.arange(0, batch_size).unsqueeze(1), torch.zeros(batch_size, 2)), 1).type_as(sparse_input.C)
-                )
-            else:
-                batch_nr = sparse_in.C[:, 0].unique()
-                if len(batch_nr) != batch_size:
-                    coords = [i for i in range(0, batch_size) if i not in batch_nr]
-                    padding = ME.SparseTensor(
-                        features=torch.zeros(batch_size - len(batch_nr), 1).type_as(sparse_in.F),
-                        coordinates=torch.cat((torch.tensor(coords).unsqueeze(1), torch.zeros(batch_size - len(batch_nr), 2)), 1).type_as(sparse_in.C),
-                        coordinate_manager=sparse_in.coordinate_manager
-                    )
-
-                    print("padding: " + str(padding))
-
-                    sparse_in = self.union(sparse_in, padding)
-
-
-            print("final input: " + str(sparse_in))
+        for t_step in range(dense.shape[0]): # in times:
+            sparse_in = self.pad_batch(None, dense[t_step], batch_size)
+            #print("sparse_in: " + str(sparse_in))
+            #print("dim: " + str(sparse_in.shape))
 
             z = self.batchnorm1(self.conv2(self.conv1(sparse_in)))
+            #print(z.shape)
 
-            print("z: " + str(z))
-
-            z = self.glob_pool(z)
-
-            print("after pool: " + str(z))
-
-            print("process first LIF")
+            #print("process first LIF")
             z, s1 = self.lif1(z, s1)
+            z = self.pad_batch(z, dense[t_step], batch_size)
+            #print("z: " + str(z))
+
+            #print(z.shape)
+            #print("process local pool")
+            z = self.loc_pool(z)
+            #print("z: " + str(z))
+            #print(z.shape)
 
             z = self.batchnorm2(self.conv3(z))
+            #print(z.shape)
 
-            z = self.glob_pool(z)
-
-            print("process second LIF")
+            #print("process second LIF")
             z, s2 = self.lif2(z, s2)
-
-            z = self.fc1(z)
-
+            #print("z: " + str(z))
+            z = self.pad_batch(z, dense[t_step], batch_size)
+            #print("z: " + str(z))
+            #print(z.shape)
             z = self.glob_pool(z)
+            #print(z.shape)
 
-            print("process third LIF")
-            z, s3 = self.lif3(z, s3)
+            #print("process fc")
+            z = self.fc1(z)
+            z = self.lrelu(z)
+
+            #print("process third LIF")
+            #z, s3 = self.lif3(z, s3)
+            #z = self.pad_batch(z, dense[t_step], batch_size)
 
             z = self.to_feature(z)
+            #print(z.shape)
 
             v_out, sout = self.out(z, sout)
 
-            print("output: " + str(v_out))
-            print("dim: " + str(v_out.shape))
-            print(" ============ " + str(t_step) + " ==============")
+            #print("final output: " + str(v_out))
+
+            #print("output: " + str(v_out))
+            #print("dim: " + str(v_out.shape))
+            #print(" ============ " + str(t_step) + " ==============")
 
             voltage[t_step, :, :] = v_out
 
+        #print("v_out: " + str(v_out))
+
         return voltage
+
+
+    def pad_batch(self, sparse_in, dense_in, batch_size):
+        if torch.sum(dense_in) == 0 and not sparse_in:
+            #print("empty input!")
+            #print("shape: " + str(dense_in.shape))
+            """
+            padding = ME.SparseTensor(
+                features=torch.zeros(batch_size, 1).type_as(sparse_input.F),
+                coordinates=torch.cat((torch.arange(0, batch_size).unsqueeze(1), torch.zeros(batch_size, 2)), 1).type_as(sparse_input.C),#.type_as(sparse_input.C)
+                coordinate_manager=sparse_input.coordinate_manager
+            )
+            print("padding: " + str(padding))
+            """
+            return self.glob_pool(ME.to_sparse_all(dense_in))
+
+            return self.union(sparse_in, padding)
+        else:
+            if not sparse_in:
+                sparse_in = ME.to_sparse(dense_in)
+            batch_nr = sparse_in.C[:, 0].unique()
+            if len(batch_nr) != batch_size:
+                coords = [i for i in range(0, batch_size) if i not in batch_nr]
+                padding = ME.SparseTensor(
+                    features=torch.zeros(batch_size - len(batch_nr), 1).type_as(sparse_in.F),
+                    coordinates=torch.cat((torch.tensor(coords).unsqueeze(1), torch.zeros(batch_size - len(batch_nr), 2)), 1).type_as(sparse_in.C),
+                    coordinate_manager=sparse_in.coordinate_manager
+                )
+
+                return self.union(sparse_in, padding)
+            else:
+                return sparse_in
 
 
 class NMNISTModule(pl.LightningModule):
@@ -163,9 +185,11 @@ class NMNISTModule(pl.LightningModule):
 
         self.train_split = train_split
 
+
     def forward(self, x):
         voltages = self.model(x)
-        m, _ = torch.max(voltages, 0)
+        #m, _ = torch.max(voltages, 0)
+        m = voltages[-1]
         log_p_y = torch.nn.functional.log_softmax(m, dim=1)
         return log_p_y
 
@@ -215,10 +239,10 @@ class NMNISTModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         chunks, labels = batch
         # Must clear cache at regular interval
-        if self.global_step % 100 == 0:
+        if self.global_step % 10 == 0:
             torch.cuda.empty_cache()
         log_p = self(chunks)
-        labels = torch.tensor(labels).to(self.device)
+        labels = torch.tensor(labels)
         loss = self.criterion(log_p, labels)
         self.log('train_loss', loss)
         return loss
@@ -233,6 +257,7 @@ class NMNISTModule(pl.LightningModule):
     #     acc = torch.eq(out.detach().argmax(1), labels).float().mean()
     #     self.log("VAcc", acc)
     #     return loss
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
@@ -244,7 +269,7 @@ class NMNISTModule(pl.LightningModule):
 def main(args):
     transform = tonic_transforms.Compose(
         [
-            #tonic_transforms.Denoise(filter_time=10000),
+            tonic_transforms.Denoise(filter_time=10000),
             tonic_transforms.Subsample(args.subsample),
             tonic_transforms.ToSparseTensor(merge_polarities=True),
         ]
